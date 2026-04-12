@@ -1,0 +1,2 @@
+C:\Users\fenex\OneDrive\Dokumente\Code\Rider-Projects\env-the-enviroment-tool\publish\env.pdb
+C:\Users\fenex\OneDrive\Dokumente\Code\Rider-Projects\env-the-enviroment-tool\publish\env.exe

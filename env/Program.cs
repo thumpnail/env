@@ -9,7 +9,7 @@ static class EnvCli
 	{
 		if (args.Length == 0)
 		{
-			RunTui();
+            HandleHelp();
 			return 0;
 		}
 
@@ -490,49 +490,123 @@ static class EnvCli
 			X = Pos.Left(valueLabel),
 			Y = Pos.Bottom(valueLabel),
 			Width = Dim.Fill(2),
-			Height = Dim.Fill(6)
+			Height = 3
+		};
+
+		var segmentsLabel = new Label("Segments:")
+		{
+			X = Pos.Left(valueLabel),
+			Y = Pos.Bottom(valueField) + 1
+		};
+
+		var segmentList = new ListView(Array.Empty<string>())
+		{
+			X = Pos.Left(segmentsLabel),
+			Y = Pos.Bottom(segmentsLabel),
+			Width = Dim.Fill(2),
+			Height = 6
+		};
+
+		var segmentEditorLabel = new Label("Selected Segment:")
+		{
+			X = Pos.Left(segmentsLabel),
+			Y = Pos.Bottom(segmentList) + 1
+		};
+
+		var segmentEditor = new TextField("")
+		{
+			X = Pos.Left(segmentEditorLabel),
+			Y = Pos.Bottom(segmentEditorLabel),
+			Width = Dim.Fill(2)
 		};
 
 		var newButton = new Button("New")
 		{
 			X = Pos.Left(nameLabel),
-			Y = Pos.Bottom(valueField) + 1
+			Y = Pos.Bottom(segmentEditor) + 1
 		};
 
-		var saveButton = new Button("Save")
+		var applySegmentButton = new Button("Apply Segment")
 		{
 			X = Pos.Right(newButton) + 1,
 			Y = Pos.Top(newButton)
 		};
 
+		var addSegmentButton = new Button("Add Segment")
+		{
+			X = Pos.Right(applySegmentButton) + 1,
+			Y = Pos.Top(newButton)
+		};
+
+		var removeSegmentButton = new Button("Remove Segment")
+		{
+			X = Pos.Right(addSegmentButton) + 1,
+			Y = Pos.Top(newButton)
+		};
+
+		var moveUpButton = new Button("Up")
+		{
+			X = Pos.Left(nameLabel),
+			Y = Pos.Bottom(newButton) + 1
+		};
+
+		var moveDownButton = new Button("Down")
+		{
+			X = Pos.Right(moveUpButton) + 1,
+			Y = Pos.Top(moveUpButton)
+		};
+
+		var saveButton = new Button("Save")
+		{
+			X = Pos.Right(moveDownButton) + 1,
+			Y = Pos.Top(moveUpButton)
+		};
+
 		var deleteButton = new Button("Delete")
 		{
 			X = Pos.Right(saveButton) + 1,
-			Y = Pos.Top(newButton)
+			Y = Pos.Top(moveUpButton)
 		};
 
 		var refreshButton = new Button("Refresh")
 		{
 			X = Pos.Right(deleteButton) + 1,
-			Y = Pos.Top(newButton)
+			Y = Pos.Top(moveUpButton)
 		};
 
 		var quitButton = new Button("Quit")
 		{
 			X = Pos.AnchorEnd(10),
-			Y = Pos.Top(newButton)
+			Y = Pos.Top(moveUpButton)
 		};
 
-		List<EnvRow> rows = [];
+		var rows = new List<EnvRow>();
+		var segments = new List<string>();
+
+		void RefreshSegmentList(int selectedIndex = 0)
+		{
+			if (segments.Count == 0)
+			{
+				segments.Add(string.Empty);
+			}
+
+			segmentList.SetSource(segments.Select(FormatSegment).ToList());
+			segmentList.SelectedItem = Math.Clamp(selectedIndex, 0, segments.Count - 1);
+			segmentEditor.Text = segments[segmentList.SelectedItem];
+		}
 
 		void Reload()
 		{
-			rows = BuildRows((Scope)scopeRadio.SelectedItem);
+			rows.Clear();
+			rows.AddRange(BuildRows((Scope)scopeRadio.SelectedItem));
 			list.SetSource(rows.Select(x => x.Display).ToList());
 			if (rows.Count == 0)
 			{
 				nameField.Text = string.Empty;
 				valueField.Text = string.Empty;
+				segments.Clear();
+				segmentList.SetSource(Array.Empty<string>());
+				segmentEditor.Text = string.Empty;
 				return;
 			}
 
@@ -544,13 +618,25 @@ static class EnvCli
 		{
 			nameField.Text = row.Name;
 			valueField.Text = row.EditValue;
+			segments.Clear();
+			segments.AddRange(SplitSegments(row.EditValue));
+			RefreshSegmentList();
 		}
 
 		list.SelectedItemChanged += e =>
 		{
-			if (e.Item >= 0 && e.Item < rows.Count)
+			var index = e.Item;
+			if (index >= 0 && index < rows.Count)
 			{
-				FillEditor(rows[e.Item]);
+				FillEditor(rows[index]);
+			}
+		};
+
+		segmentList.SelectedItemChanged += e =>
+		{
+			if (e.Item >= 0 && e.Item < segments.Count)
+			{
+				segmentEditor.Text = segments[e.Item];
 			}
 		};
 
@@ -560,13 +646,95 @@ static class EnvCli
 		{
 			nameField.Text = string.Empty;
 			valueField.Text = string.Empty;
+			segments.Clear();
+			RefreshSegmentList();
 			nameField.SetFocus();
 		};
+
+		applySegmentButton.Clicked += () =>
+		{
+			if (segments.Count == 0)
+			{
+				segments.Add(string.Empty);
+			}
+
+			var index = segmentList.SelectedItem;
+			if (index < 0 || index >= segments.Count)
+			{
+				index = 0;
+			}
+
+			segments[index] = segmentEditor.Text?.ToString() ?? string.Empty;
+			RefreshSegmentList(index);
+			valueField.Text = string.Join(";", segments);
+		};
+
+		addSegmentButton.Clicked += () =>
+		{
+			var index = segmentList.SelectedItem;
+			if (index < 0 || index >= segments.Count)
+			{
+				index = segments.Count - 1;
+			}
+
+			segments.Insert(index + 1, string.Empty);
+			RefreshSegmentList(index + 1);
+			valueField.Text = string.Join(";", segments);
+		};
+
+		removeSegmentButton.Clicked += () =>
+		{
+			if (segments.Count <= 1)
+			{
+				segments.Clear();
+				segments.Add(string.Empty);
+				RefreshSegmentList(0);
+				valueField.Text = string.Join(";", segments);
+				return;
+			}
+
+			var index = segmentList.SelectedItem;
+			if (index < 0 || index >= segments.Count)
+			{
+				index = segments.Count - 1;
+			}
+
+			segments.RemoveAt(index);
+			RefreshSegmentList(Math.Min(index, segments.Count - 1));
+			valueField.Text = string.Join(";", segments);
+		};
+
+		moveUpButton.Clicked += () => MoveSegment(-1);
+		moveDownButton.Clicked += () => MoveSegment(1);
+
+		void MoveSegment(int delta)
+		{
+			if (segments.Count <= 1)
+			{
+				return;
+			}
+
+			var index = segmentList.SelectedItem;
+			if (index < 0 || index >= segments.Count)
+			{
+				return;
+			}
+
+			var newIndex = index + delta;
+			if (newIndex < 0 || newIndex >= segments.Count)
+			{
+				return;
+			}
+
+			(segments[index], segments[newIndex]) = (segments[newIndex], segments[index]);
+			RefreshSegmentList(newIndex);
+			valueField.Text = string.Join(";", segments);
+		}
 
 		saveButton.Clicked += () =>
 		{
 			var name = nameField.Text?.ToString()?.Trim() ?? string.Empty;
-			var value = valueField.Text?.ToString() ?? string.Empty;
+			var value = string.Join(";", segments);
 
 			if (string.IsNullOrWhiteSpace(name))
 			{
@@ -627,8 +795,8 @@ static class EnvCli
 
 		win.Add(scopeRadio);
 		win.Add(list);
-		win.Add(nameLabel, nameField, valueLabel, valueField);
-		win.Add(newButton, saveButton, deleteButton, refreshButton, quitButton);
+		win.Add(nameLabel, nameField, valueLabel, valueField, segmentsLabel, segmentList, segmentEditorLabel, segmentEditor);
+		win.Add(newButton, applySegmentButton, addSegmentButton, removeSegmentButton, moveUpButton, moveDownButton, saveButton, deleteButton, refreshButton, quitButton);
 		top.Add(win);
 
 		Reload();
@@ -675,6 +843,20 @@ static class EnvCli
 
 		return rows;
 	}
+
+	private static List<string> SplitSegments(string value)
+	{
+		if (string.IsNullOrEmpty(value))
+		{
+			return [string.Empty];
+		}
+
+		return value
+			.Split(';')
+			.ToList();
+	}
+
+	private static string FormatSegment(string segment) => string.IsNullOrEmpty(segment) ? "(empty)" : segment;
 
 	private readonly record struct EnvRow(string Name, string EditValue, string Display);
 

@@ -6,6 +6,13 @@ project := "env/env.csproj"
 build:
     dotnet build {{project}}
 
+build-release:
+	dotnet build {{project}} -c Release
+
+# Publish a self-contained single-file Windows executable.
+publish:
+  dotnet publish {{project}} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+
 # Run the env CLI (pass args with: just run -- <args>)
 run *args:
     dotnet run --project {{project}} -- {{args}}
