@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using System.Text;
 using Terminal.Gui;
 
 return EnvCli.Run(args);
@@ -24,6 +25,7 @@ static class EnvCli
 				"set" => HandleSet(tail),
 				"unset" => HandleUnset(tail),
 				"list" => HandleList(tail),
+				"load" => HandleLoad(tail),
 				"tui" => HandleTui(tail),
 				"help" or "--help" or "-h" => HandleHelp(),
 				_ => Fail($"Unknown command '{command}'.")
@@ -189,6 +191,47 @@ static class EnvCli
 		return 0;
 	}
 
+	private static int HandleLoad(string[] args)
+	{
+		var options = ParseLoadOptions(args);
+
+		if (!File.Exists(options.FilePath))
+		{
+			return Fail($".env file not found: {options.FilePath}");
+		}
+
+		var variables = ParseDotEnvFile(options.FilePath);
+		if (variables.Count == 0)
+		{
+			return 0;
+		}
+
+		var shell = options.Shell == LoadShell.Auto ? DetectShell() : options.Shell;
+		foreach (var (name, value) in variables)
+		{
+			if (!options.OverrideExisting && Environment.GetEnvironmentVariable(name) is not null)
+			{
+				continue;
+			}
+
+			if (shell == LoadShell.Bash && !IsValidBashName(name))
+			{
+				Console.Error.WriteLine($"Skipping invalid bash variable name '{name}'.");
+				continue;
+			}
+
+			Console.WriteLine(shell switch
+			{
+				LoadShell.Pwsh => $"$env:{name} = '{EscapePwsh(value)}'",
+				LoadShell.Cmd => $"set \"{name}={EscapeCmd(value)}\"",
+				LoadShell.Bash => $"export {name}='{EscapeBash(value)}'",
+				_ => throw new InvalidOperationException("Unsupported shell.")
+			});
+		}
+
+		return 0;
+	}
+
 	private static int HandleHelp()
 	{
 		Console.WriteLine("env - environment variable manager");
@@ -198,7 +241,13 @@ static class EnvCli
 		Console.WriteLine("  env set <name> <value> [--scope local|global] [--force-global]");
 		Console.WriteLine("  env unset <name> [--scope local|global] [--force-global]");
 		Console.WriteLine("  env list [--scope local|global|all]");
+		Console.WriteLine("  env load [--file <path>|<path>] [--shell auto|pwsh|cmd|bash] [--override]");
 		Console.WriteLine("  env tui");
+		Console.WriteLine();
+		Console.WriteLine("Session-only .env loading:");
+		Console.WriteLine("  pwsh: env load | Invoke-Expression");
+		Console.WriteLine("  bash: eval \"$(env load --shell bash)\"");
+		Console.WriteLine("  Values live only in the active shell session.");
 		Console.WriteLine();
 		Console.WriteLine("Scopes:");
 		Console.WriteLine("  local  = current user environment variables");
@@ -429,6 +478,193 @@ static class EnvCli
 	};
 
 	private static string ScopeName(Scope scope) => scope == Scope.Local ? "local" : "global";
+
+	private static LoadOptions ParseLoadOptions(string[] args)
+	{
+		var filePath = ".env";
+		var shell = LoadShell.Auto;
+		var overrideExisting = false;
+
+		for (var i = 0; i < args.Length; i++)
+		{
+			var arg = args[i];
+			if (arg.Equals("--file", StringComparison.OrdinalIgnoreCase))
+			{
+				i++;
+				if (i >= args.Length)
+				{
+					throw new InvalidOperationException("Missing value for --file.");
+				}
+
+				filePath = args[i];
+				continue;
+			}
+
+			if (arg.Equals("--shell", StringComparison.OrdinalIgnoreCase))
+			{
+				i++;
+				if (i >= args.Length)
+				{
+					throw new InvalidOperationException("Missing value for --shell.");
+				}
+
+				shell = args[i].ToLowerInvariant() switch
+				{
+					"auto" => LoadShell.Auto,
+					"pwsh" => LoadShell.Pwsh,
+					"cmd" => LoadShell.Cmd,
+					"bash" => LoadShell.Bash,
+					_ => throw new InvalidOperationException($"Unknown shell '{args[i]}'.")
+				};
+				continue;
+			}
+
+			if (arg.Equals("--override", StringComparison.OrdinalIgnoreCase))
+			{
+				overrideExisting = true;
+				continue;
+			}
+
+			if (arg.StartsWith("--", StringComparison.Ordinal))
+			{
+				throw new InvalidOperationException($"Unknown option '{arg}'.");
+			}
+
+			if (filePath != ".env")
+			{
+				throw new InvalidOperationException("Only one .env path can be provided.");
+			}
+
+			filePath = arg;
+		}
+
+		return new LoadOptions(filePath, shell, overrideExisting);
+	}
+
+	private static Dictionary<string, string> ParseDotEnvFile(string filePath)
+	{
+		var result = new Dictionary<string, string>(StringComparer.Ordinal);
+		var lines = File.ReadAllLines(filePath);
+
+		for (var index = 0; index < lines.Length; index++)
+		{
+			var line = lines[index].Trim();
+			if (line.Length == 0 || line.StartsWith('#'))
+			{
+				continue;
+			}
+
+			if (line.StartsWith("export ", StringComparison.OrdinalIgnoreCase))
+			{
+				line = line[7..].Trim();
+			}
+
+			var equalsIndex = line.IndexOf('=');
+			if (equalsIndex <= 0)
+			{
+				throw new InvalidOperationException($"Invalid .env entry at line {index + 1}: '{lines[index]}'");
+			}
+
+			var name = line[..equalsIndex].Trim();
+			var rawValue = line[(equalsIndex + 1)..].Trim();
+			if (!IsValidVariableName(name))
+			{
+				throw new InvalidOperationException($"Invalid variable name '{name}' at line {index + 1}.");
+			}
+
+			result[name] = ParseDotEnvValue(rawValue);
+		}
+
+		return result;
+	}
+
+	private static string ParseDotEnvValue(string rawValue)
+	{
+		if (rawValue.Length >= 2 && rawValue[0] == '"' && rawValue[^1] == '"')
+		{
+			return UnescapeDoubleQuoted(rawValue[1..^1]);
+		}
+
+		if (rawValue.Length >= 2 && rawValue[0] == '\'' && rawValue[^1] == '\'')
+		{
+			return rawValue[1..^1];
+		}
+
+		var commentStart = rawValue.IndexOf(" #", StringComparison.Ordinal);
+		if (commentStart >= 0)
+		{
+			rawValue = rawValue[..commentStart];
+		}
+
+		return rawValue.Trim();
+	}
+
+	private static string UnescapeDoubleQuoted(string value)
+	{
+		var sb = new StringBuilder(value.Length);
+		for (var i = 0; i < value.Length; i++)
+		{
+			if (value[i] != '\\' || i + 1 >= value.Length)
+			{
+				sb.Append(value[i]);
+				continue;
+			}
+
+			i++;
+			sb.Append(value[i] switch
+			{
+				'n' => '\n',
+				'r' => '\r',
+				't' => '\t',
+				'"' => '"',
+				'\\' => '\\',
+				other => other
+			});
+		}
+
+		return sb.ToString();
+	}
+
+	private static bool IsValidVariableName(string name)
+	{
+		if (string.IsNullOrWhiteSpace(name))
+		{
+			return false;
+		}
+
+		if (!(char.IsLetter(name[0]) || name[0] == '_'))
+		{
+			return false;
+		}
+
+		for (var i = 1; i < name.Length; i++)
+		{
+			if (!(char.IsLetterOrDigit(name[i]) || name[i] == '_'))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	private static bool IsValidBashName(string name) => IsValidVariableName(name);
+
+	private static LoadShell DetectShell()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return LoadShell.Pwsh;
+		}
+
+		return LoadShell.Bash;
+	}
+
+	private static string EscapePwsh(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+
+	private static string EscapeCmd(string value) => value.Replace("\"", "\"\"", StringComparison.Ordinal);
+
+	private static string EscapeBash(string value) => value.Replace("'", "'\"'\"'", StringComparison.Ordinal);
 
 	private static int Fail(string message)
 	{
@@ -862,6 +1098,8 @@ static class EnvCli
 
 	private readonly record struct CliOptions(Scope Scope, bool ForceGlobal);
 
+	private readonly record struct LoadOptions(string FilePath, LoadShell Shell, bool OverrideExisting);
+
 	private readonly record struct SuggestionMatch(int Score, bool IsRelevant);
 
 	private enum Scope
@@ -869,5 +1107,13 @@ static class EnvCli
 		Local,
 		Global,
 		All
+	}
+
+	private enum LoadShell
+	{
+		Auto,
+		Pwsh,
+		Cmd,
+		Bash
 	}
 }
